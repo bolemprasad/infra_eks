@@ -7,3 +7,17 @@
 
 # Terraform lock file (optional: usually commit this)
 # .terraform.lock.hcl
+
+
+
+
+
+
+
+
+
+
+#git remote -v
+#git remote set-url origin git@github.com:bolemprasad/infra_eks.git
+#ssh -T git@github.com
+#git push origin main

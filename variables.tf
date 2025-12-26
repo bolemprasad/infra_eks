@@ -108,4 +108,46 @@ variable "pub_route" {
     }
 
 }
+
+
+#### tags for private route table
+variable "private_route" {
+    description = "private route table"
+    type = map(string)
+    default = {
+      "Name" = "private-route-table"
+      Env = "dev"
+    }
+  
+}
+
+
+#### security group tags
+variable "sg" {
+    description = "security group tags"
+    type = map(string)
+    default = {
+      "Name" = "test-sg"
+      Env = "Dev"
+    }
+  
+}
+
+#### varible for instance type
+variable "instance_type" {
+    description = "instance type"
+    type = string
+    default = "t3.micro"
+  
+}
+
+
+### varible for pem key
+
+variable "key_name" {
+    description = "pem file"
+    type = string
+    default = "test-key-pair"
+  
+}
   
