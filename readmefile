@@ -1,0 +1,66 @@
+# Infrastructure Setup — EKS + Bastion (Private Cluster)
+
+This document describes the current infrastructure that has been deployed using Terraform.
+
+---
+
+## ✔️ Architecture Overview (Current State)
+
+We have deployed:
+
+- **VPC**
+  - 2 Public Subnets
+  - 2 Private Subnets
+- **Internet Gateway**
+- **NAT Gateway**
+- **Route Tables**
+  - Public route → IGW
+  - Private route → NAT Gateway
+- **EKS Cluster**
+  - Private endpoint only (`endpoint_public_access = false`)
+  - Worker nodes in Private Subnets
+- **EC2 Bastion Host**
+  - Installed AWS CLI + kubectl
+  - Used for cluster access
+- **IAM Roles**
+  - Cluster Role
+  - Node Role
+  - Bastion Role
+- **aws-auth ConfigMap**
+  - Mapped Bastion Role → `system:masters`
+  - Mapped Node Role → `system:nodes`
+
+---
+
+## 📂 Resource Flow
+
+1. **Terraform creates VPC networking**
+2. **EKS cluster deployed with private API endpoint**
+3. **Node group deployed inside private subnets**
+4. **Bastion EC2 created in public subnet**
+5. **aws-auth ConfigMap configured**
+6. **Cluster accessible only through Bastion**
+
+---
+
+## 🔒 Access Rules (Current)
+
+| Component | Access |
+|---|---|
+| EKS API Server | Private only |
+| Nodegroup | Private Subnets |
+| Bastion SSH | Public IP |
+| Local Machine | No direct EKS access |
+| Users | Via Bastion only |
+
+---
+
+## 🧩 Terraform Highlights
+
+### **EKS Endpoint Configuration**
+```hcl
+vpc_config {
+  subnet_ids              = aws_subnet.test_private_sub[*].id
+  endpoint_private_access = true
+  endpoint_public_access  = false
+}

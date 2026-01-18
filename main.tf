@@ -41,7 +41,13 @@ resource "aws_subnet" "test_pub_sub_1" {
     availability_zone = var.subnet_azs[count.index]
 
 
-    tags = var.subnet_tag
+    tags = merge(
+    var.subnet_tag,
+    {
+      "kubernetes.io/role/elb" = "1"
+      "kubernetes.io/cluster/test-eks-cluster" = "shared"
+    }
+  )
 
   
 }
@@ -66,7 +72,13 @@ resource "aws_route_table" "public" {
         cidr_block = "0.0.0.0/0"
         gateway_id = aws_internet_gateway.test_igw.id
     }
-    tags = var.pub_route
+    tags = merge(
+    var.private_subnet_tags,
+    {
+      "kubernetes.io/role/internal-elb" = "1"
+      "kubernetes.io/cluster/test-eks-cluster" = "shared"
+    }
+  )
 
 }
 
@@ -130,6 +142,16 @@ resource "aws_security_group" "test_security_group" {
 
   }
 
+/*
+  ingress {
+  from_port   = 2222
+  to_port     = 2222
+  protocol    = "tcp"
+  cidr_blocks = ["0.0.0.0/0"]
+}
+*/
+
+
   egress {
     description = "allow all outbound rules"
     from_port = 0
@@ -140,6 +162,17 @@ resource "aws_security_group" "test_security_group" {
   tags = var.sg
   
 }
+###########
+resource "aws_security_group_rule" "eks_api_from_bastion" {
+  type                     = "ingress"
+  from_port                = 443
+  to_port                  = 443
+  protocol                 = "tcp"
+
+  security_group_id         = aws_eks_cluster.test_eks_cluster.vpc_config[0].cluster_security_group_id
+  source_security_group_id  = aws_security_group.test_security_group.id
+}
+
 
 ### iam role for ssm
 resource "aws_iam_role" "ssm_role" {
@@ -186,11 +219,281 @@ resource "aws_instance" "bastion" {
   key_name = var.key_name
   vpc_security_group_ids = [ aws_security_group.test_security_group.id ]
   associate_public_ip_address = true
-  iam_instance_profile = aws_iam_instance_profile.ssm_profile.name
+  #iam_instance_profile = aws_iam_instance_profile.ssm_profile.name
+  iam_instance_profile = aws_iam_instance_profile.bastion_eks_profile.name
+
+  user_data = <<-EOF
+  #!/bin/bash
+  set -e
+
+  # Install dependencies
+  sudo yum update -y
+  sudo yum install -y unzip curl
+
+  # Install AWS CLI v2
+  curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+  unzip awscliv2.zip
+  sudo ./aws/install --update
+
+  # Install kubectl
+  curl -LO "https://dl.k8s.io/release/v1.29.0/bin/linux/amd64/kubectl"
+  chmod +x kubectl
+  sudo mv kubectl /usr/local/bin/
+
+  EOF
+
 
   tags = {
     Name = "bastion-server"
     Env = "Dev"
   }
   
+}
+
+##############
+data "aws_caller_identity" "current" {}
+
+
+### creating new role for bastion this is commenting the below role
+/*
+resource "aws_iam_role" "bastion_eks_role" {
+  name = "bastion-eks-role"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17",
+    Statement = [
+      {
+        Effect = "Allow",
+        Principal = { Service = "ec2.amazonaws.com" },
+        Action = "sts:AssumeRole"
+      },
+      {
+        Effect = "Allow",
+        Principal = {
+          AWS = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:role/bastion-eks-role"
+        },
+        Action = "sts:AssumeRole"
+      }
+    ]
+  })
+}
+*/
+
+#### this is new role for bastion eks 
+resource "aws_iam_role" "bastion_eks_role" {
+  name = "bastion-eks-role"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17",
+    Statement = [
+      {
+        Effect = "Allow",
+        Principal = { Service = "ec2.amazonaws.com" },
+        Action = "sts:AssumeRole"
+      }
+    ]
+  })
+}
+
+
+
+/*
+resource "aws_iam_role_policy_attachment" "bastion_ssm" {
+  role       = aws_iam_role.bastion_eks_role.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
+}
+*/
+
+resource "aws_iam_role_policy_attachment" "bastion_eks" {
+  role       = aws_iam_role.bastion_eks_role.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonEKSClusterPolicy"
+}
+
+resource "aws_iam_instance_profile" "bastion_eks_profile" {
+  name = "bastion-eks-profile"
+  role = aws_iam_role.bastion_eks_role.name
+}
+
+##################################
+
+resource "aws_iam_role_policy_attachment" "bastion_eks_access_k8s" {
+  role       = aws_iam_role.bastion_eks_role.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonEKSClusterPolicy"
+}
+
+#########################
+resource "aws_iam_policy" "bastion_k8s_api" {
+  name = "bastion-k8s-api-access"
+  policy = jsonencode({
+    Version = "2012-10-17",
+    Statement = [
+      {
+        Effect = "Allow",
+        Action = [
+          "eks:DescribeCluster",
+          "eks:ListClusters",
+          "eks:AccessKubernetesApi"
+        ],
+        Resource = "*"
+      },
+      {
+        Effect = "Allow",
+        Action = [
+          "sts:AssumeRole"
+        ],
+        Resource = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:role/bastion-eks-role"
+      }
+    ]
+  })
+}
+
+
+resource "aws_iam_role_policy_attachment" "bastion_k8s_api_attach" {
+  role       = aws_iam_role.bastion_eks_role.name
+  policy_arn = aws_iam_policy.bastion_k8s_api.arn
+}
+
+
+
+#### create IAM role for eks cluster
+
+resource "aws_iam_role" "eks_cluster_role" {
+  name = "eks-cluster-role"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Principal = {
+          Service = "eks.amazonaws.com"
+        }
+        Action = "sts:AssumeRole"
+      }
+    ]
+  })
+}
+
+### policy attachment
+resource "aws_iam_role_policy_attachment" "eks_cluster_policy" {
+  role       = aws_iam_role.eks_cluster_role.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonEKSClusterPolicy"
+}
+
+
+#### create EKS cluster
+resource "aws_eks_cluster" "test_eks_cluster" {
+  name = "test-eks-cluster"
+  role_arn = aws_iam_role.eks_cluster_role.arn
+
+  vpc_config {
+    subnet_ids              = aws_subnet.test_private_sub[*].id
+    endpoint_private_access = true
+    endpoint_public_access = false
+  }
+  
+}
+
+
+#### create iam role for eks nodes
+resource "aws_iam_role" "test_eks_node_role" {
+  name = "test-eks-node-role"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Principal = {
+          Service = "ec2.amazonaws.com"
+        }
+        Action = "sts:AssumeRole"
+      }
+    ]
+  })
+}
+
+##########################
+resource "aws_iam_role_policy_attachment" "bastion_ssm" {
+  role       = aws_iam_role.bastion_eks_role.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
+}
+
+resource "aws_iam_policy" "bastion_eks_read_policy" {
+  name = "bastion-eks-read-policy"
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect = "Allow"
+      Action = [
+        "eks:DescribeCluster",
+        "eks:ListClusters"
+      ]
+      Resource = "*"
+    }]
+  })
+}
+
+resource "aws_iam_role_policy_attachment" "bastion_eks_read_attach" {
+  role       = aws_iam_role.bastion_eks_role.name
+  policy_arn = aws_iam_policy.bastion_eks_read_policy.arn
+}
+
+
+
+
+
+
+### policy attachment for nodes
+resource "aws_iam_role_policy_attachment" "eks_worker_node_policy" {
+  role = aws_iam_role.test_eks_node_role.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonEKSWorkerNodePolicy"
+  
+}
+
+resource "aws_iam_role_policy_attachment" "eks_cni_policy" {
+  role = aws_iam_role.test_eks_node_role.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy"
+  
+}
+
+resource "aws_iam_role_policy_attachment" "eks_ecr_policy" {
+  role = aws_iam_role.test_eks_node_role.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly"
+  
+}
+
+/*
+resource "aws_iam_role_policy_attachment" "bastion_eks_access" {
+  role       = aws_iam_role.ssm_role.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonEKSClusterPolicy"
+}
+*/
+
+/*
+resource "aws_iam_role_policy_attachment" "bastion_eks_readonly" {
+  role       = aws_iam_role.bastion_eks_role.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonEKSReadOnlyAccess"
+}
+*/
+
+
+
+
+##########create eks node group
+resource "aws_eks_node_group" "test_node_group" {
+  cluster_name = aws_eks_cluster.test_eks_cluster.name
+  node_group_name = "test-node-group"
+  node_role_arn = aws_iam_role.test_eks_node_role.arn
+  subnet_ids = aws_subnet.test_private_sub[*].id
+
+  scaling_config {
+    desired_size = 2
+    min_size = 1
+    max_size = 4
+  }
+  instance_types = ["t3.micro"]
+  capacity_type = "ON_DEMAND"
+  depends_on = [ aws_iam_role_policy_attachment.eks_worker_node_policy, aws_iam_role_policy_attachment.eks_cni_policy, aws_iam_role_policy_attachment.eks_ecr_policy ]
 }
